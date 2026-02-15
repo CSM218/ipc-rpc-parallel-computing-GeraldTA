@@ -5,8 +5,7 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * JUnit 5 tests for the Worker class.
- * Tests worker lifecycle and asynchronous behaviors.
+ * Worker class tests.
  */
 class WorkerTest {
 
@@ -14,13 +13,12 @@ class WorkerTest {
 
     @BeforeEach
     void setUp() {
-        worker = new Worker();
+        worker = new Worker("test-worker", "localhost", 9999);
     }
 
     @Test
     void testWorker_Join_Logic() {
         assertDoesNotThrow(() -> {
-            // Should attempt to connect but handle failures gracefully
             worker.joinCluster("localhost", 9999);
         }, "Worker join logic should handle network absence gracefully");
     }
