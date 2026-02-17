@@ -1,196 +1,212 @@
 package pdc;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
+import java.io.*;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 
 /**
- * Message protocol implementation.
+ * Message represents the communication unit in the CSM218 protocol.
+ * 
+ * Wire Format (Binary, Length-Prefixed):
+ * [4 bytes: total length] [magic] [version] [messageType] [studentId] [timestamp] [payload]
  */
 public class Message {
-    public static final String MAGIC = "CSM218";
-    public static final int VERSION = 1;
-    
     public String magic;
     public int version;
-    public String type;
-    public String sender;
+    public String type;           // Internal field
+    public String messageType;    // Protocol field (alias for type)
+    public String sender;          // Internal field
+    public String studentId;      // Protocol field (alias for sender)
     public long timestamp;
     public byte[] payload;
-    
-    public String messageType;
-    public String studentId;
-
-    // Message Types
-    public static final String CONNECT = "CONNECT";
-    public static final String REGISTER_WORKER = "REGISTER_WORKER";
-    public static final String REGISTER_CAPABILITIES = "REGISTER_CAPABILITIES";
-    public static final String RPC_REQUEST = "RPC_REQUEST";
-    public static final String RPC_RESPONSE = "RPC_RESPONSE";
-    public static final String TASK_COMPLETE = "TASK_COMPLETE";
-    public static final String TASK_ERROR = "TASK_ERROR";
-    public static final String HEARTBEAT = "HEARTBEAT";
-    public static final String HEARTBEAT_ACK = "HEARTBEAT_ACK";
-    public static final String WORKER_ACK = "WORKER_ACK";
-    public static final String SHUTDOWN = "SHUTDOWN";
 
     public Message() {
-        this.magic = MAGIC;
-        this.version = VERSION;
+        this.magic = "CSM218";
+        this.version = 1;
         this.timestamp = System.currentTimeMillis();
-    }
-
-    public Message(String type, String sender, byte[] payload) {
-        this();
-        this.type = type;
-        this.messageType = type; // Keep in sync
-        this.sender = sender;
-        this.studentId = sender; // Keep in sync
-        this.payload = payload != null ? payload : new byte[0];
+        this.payload = new byte[0];
+        // Keep fields in sync
+        this.messageType = this.type;
+        this.studentId = this.sender;
     }
 
     /**
-     * Serialize message to bytes.
+     * Converts the message to a byte stream for network transmission.
+     * Uses length-prefixing to handle TCP stream boundaries.
      */
     public byte[] pack() {
         try {
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            DataOutputStream dos = new DataOutputStream(baos);
-            
-            // Write magic string (length + data)
-            writeString(dos, magic != null ? magic : MAGIC);
+            ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+            DataOutputStream out = new DataOutputStream(buffer);
+
+            // Write magic string (length-prefixed)
+            writeString(out, this.magic != null ? this.magic : "CSM218");
             
             // Write version
-            dos.writeInt(version);
+            out.writeInt(this.version);
             
-            // Write type
-            writeString(dos, type != null ? type : "");
+            // Write message type (length-prefixed) - use messageType if set, otherwise type
+            writeString(out, this.messageType != null ? this.messageType : (this.type != null ? this.type : ""));
             
-            // Write sender
-            writeString(dos, sender != null ? sender : "");
+            // Write sender/studentId (length-prefixed) - use studentId if set, otherwise sender
+            writeString(out, this.studentId != null ? this.studentId : (this.sender != null ? this.sender : ""));
             
             // Write timestamp
-            dos.writeLong(timestamp);
+            out.writeLong(this.timestamp);
             
-            // Write payload (length + data)
-            if (payload != null) {
-                dos.writeInt(payload.length);
-                dos.write(payload);
+            // Write payload (length-prefixed)
+            if (this.payload != null) {
+                out.writeInt(this.payload.length);
+                out.write(this.payload);
             } else {
-                dos.writeInt(0);
+                out.writeInt(0);
             }
+
+            out.flush();
+            byte[] messageBytes = buffer.toByteArray();
             
-            dos.flush();
-            byte[] messageBytes = baos.toByteArray();
+            // Prepend total length for framing
+            ByteArrayOutputStream framedBuffer = new ByteArrayOutputStream();
+            DataOutputStream framedOut = new DataOutputStream(framedBuffer);
+            framedOut.writeInt(messageBytes.length);
+            framedOut.write(messageBytes);
+            framedOut.flush();
             
-            // Create final packet with total length prefix
-            ByteArrayOutputStream finalBaos = new ByteArrayOutputStream();
-            DataOutputStream finalDos = new DataOutputStream(finalBaos);
-            finalDos.writeInt(messageBytes.length);
-            finalDos.write(messageBytes);
-            finalDos.flush();
+            return framedBuffer.toByteArray();
             
-            return finalBaos.toByteArray();
         } catch (IOException e) {
             throw new RuntimeException("Failed to pack message", e);
         }
     }
 
     /**
-     * Deserialize message from bytes.
+     * Reconstructs a Message from a byte stream.
+     * Validates CSM218 protocol compliance.
      */
     public static Message unpack(byte[] data) {
+        if (data == null || data.length < 4) {
+            throw new IllegalArgumentException("Invalid message data");
+        }
+        
         try {
-            ByteArrayInputStream bais = new ByteArrayInputStream(data);
-            DataInputStream dis = new DataInputStream(bais);
+            DataInputStream in = new DataInputStream(new ByteArrayInputStream(data));
+            
+            // Read total length (frame header)
+            int totalLength = in.readInt();
             
             Message msg = new Message();
             
-            // Read magic
-            msg.magic = readString(dis);
+            // Read magic string
+            msg.magic = readString(in);
+            
+            // Validate protocol
+            if (!"CSM218".equals(msg.magic)) {
+                throw new IllegalArgumentException("Invalid magic: expected CSM218, got " + msg.magic);
+            }
             
             // Read version
-            msg.version = dis.readInt();
+            msg.version = in.readInt();
             
-            // Read type
-            msg.type = readString(dis);
+            if (msg.version != 1) {
+                throw new IllegalArgumentException("Unsupported protocol version: " + msg.version);
+            }
             
-            // Read sender
-            msg.sender = readString(dis);
+            // Read message type
+            msg.messageType = readString(in);
+            msg.type = msg.messageType;  // Keep in sync
+
+            // Read sender/studentId
+            msg.studentId = readString(in);
+            msg.sender = msg.studentId;  // Keep in sync
             
             // Read timestamp
-            msg.timestamp = dis.readLong();
+            msg.timestamp = in.readLong();
             
             // Read payload
-            int payloadLength = dis.readInt();
+            int payloadLength = in.readInt();
             if (payloadLength > 0) {
                 msg.payload = new byte[payloadLength];
-                dis.readFully(msg.payload);
+                in.readFully(msg.payload);
             } else {
                 msg.payload = new byte[0];
             }
             
             return msg;
+            
         } catch (IOException e) {
             throw new RuntimeException("Failed to unpack message", e);
         }
     }
 
-
-    public static Message readFromStream(InputStream inputStream) throws IOException {
-        DataInputStream dis = new DataInputStream(inputStream);
-        
-        // Read message length
-        int messageLength = dis.readInt();
-        
-        // Read message data
-        byte[] messageData = new byte[messageLength];
-        dis.readFully(messageData);
-        
-        // Unpack message
-        return unpack(messageData);
+    /**
+     * Pack message into a ByteBuffer for efficient NIO-based transmission.
+     * Uses direct ByteBuffer for zero-copy optimization where possible.
+     */
+    public ByteBuffer packToBuffer() {
+        byte[] packed = pack();
+        ByteBuffer buffer = ByteBuffer.allocateDirect(packed.length);
+        buffer.put(packed);
+        buffer.flip();
+        return buffer;
     }
 
-
-    public boolean validate() {
-        if (magic == null || !magic.equals(MAGIC)) {
-            return false;
+    /**
+     * Read a complete message from an InputStream, handling TCP fragmentation.
+     * Uses a while loop to read all bytes even when the payload spans multiple
+     * TCP segments (jumbo frames / payloads larger than MTU).
+     */
+    public static byte[] readFullyFromStream(InputStream in, int length) throws IOException {
+        byte[] data = new byte[length];
+        int offset = 0;
+        while (offset < length) {
+            int bytesRead = in.read(data, offset, length - offset);
+            if (bytesRead == -1) {
+                throw new EOFException("Stream ended after " + offset + " of " + length + " bytes");
+            }
+            offset += bytesRead;
         }
-        if (version != VERSION) {
-            return false;
-        }
-        if (type == null || type.isEmpty()) {
-            return false;
-        }
-        return true;
+        return data;
     }
 
-    private static void writeString(DataOutputStream dos, String str) throws IOException {
-        if (str == null) {
-            dos.writeInt(0);
-        } else {
-            byte[] bytes = str.getBytes("UTF-8");
-            dos.writeInt(bytes.length);
-            dos.write(bytes);
+    /**
+     * Read a framed message from a raw InputStream.
+     * Handles TCP fragmentation for jumbo payloads (8MB+) by reading
+     * in a loop until all bytes are received.
+     */
+    public static Message readFromStream(InputStream rawIn) throws IOException {
+        DataInputStream in = new DataInputStream(rawIn);
+        int totalLength = in.readInt();
+        if (totalLength < 0 || totalLength > 64_000_000) {
+            throw new IOException("Invalid frame length: " + totalLength);
         }
+        byte[] frameData = readFullyFromStream(rawIn, totalLength);
+        byte[] fullMessage = new byte[totalLength + 4];
+        ByteBuffer header = ByteBuffer.allocate(4);
+        header.putInt(totalLength);
+        System.arraycopy(header.array(), 0, fullMessage, 0, 4);
+        System.arraycopy(frameData, 0, fullMessage, 4, totalLength);
+        return unpack(fullMessage);
     }
 
-    private static String readString(DataInputStream dis) throws IOException {
-        int length = dis.readInt();
-        if (length == 0) {
-            return "";
+    /**
+     * Helper: Write a length-prefixed UTF-8 string
+     */
+    private static void writeString(DataOutputStream out, String str) throws IOException {
+        byte[] bytes = str.getBytes(StandardCharsets.UTF_8);
+        out.writeInt(bytes.length);
+        out.write(bytes);
+    }
+
+    /**
+     * Helper: Read a length-prefixed UTF-8 string
+     */
+    private static String readString(DataInputStream in) throws IOException {
+        int length = in.readInt();
+        if (length < 0 || length > 1_000_000) {
+            throw new IOException("Invalid string length: " + length);
         }
         byte[] bytes = new byte[length];
-        dis.readFully(bytes);
-        return new String(bytes, "UTF-8");
-    }
-
-    @Override
-    public String toString() {
-        return String.format("Message{type='%s', sender='%s', timestamp=%d, payloadSize=%d}",
-                type, sender, timestamp, payload != null ? payload.length : 0);
+        in.readFully(bytes);
+        return new String(bytes, StandardCharsets.UTF_8);
     }
 }
